@@ -13,21 +13,22 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Testes do módulo de pistas.
- * Rodar:  java -cp out aeroporto.pista.TestePista
- *
+ * 
  *  Teste 1: dois aviões tentam ocupar a mesma pista NO MESMO INSTANTE, 10.000 vezes.
  *           Em todas, exatamente um entra e o outro recebe ExcecaoPistaOcupada.
  *  Teste 2: avião que não está na pista não consegue liberá-la.
  *  Teste 3: simulação com a torre real por alguns segundos.
  *           Com o controle ligado: nenhuma exceção.
  *           Com [CONTROLE-CONCORRENCIA #T1] comentada: mostra a exceção e o motivo.
+ *  Teste 4: a mesma simulação, com pistas fechando e reabrindo (Extra 4).
  */
 public class TestePista {
 
     public static void main(String[] args) throws Exception {
         testeOcupacaoSimultanea(10_000);
         testeLiberacaoIndevida();
-        testeSimulacaoComTorre(5);
+        testeSimulacaoComTorre(5, false);
+        testeSimulacaoComTorre(3, true);
     }
 
     static void testeOcupacaoSimultanea(int rodadas) throws Exception {
@@ -88,8 +89,9 @@ public class TestePista {
         if (!pista.estaLivre()) throw new AssertionError("Pista deveria estar livre");
     }
 
-    static void testeSimulacaoComTorre(int segundos) throws Exception {
-        System.out.println("\n=== Teste 3: simulação com a torre, 8 aviões, 2 pistas, " + segundos + "s ===");
+    static void testeSimulacaoComTorre(int segundos, boolean comManutencao) throws Exception {
+        System.out.println("\n=== Teste " + (comManutencao ? "4" : "3") + ": simulação com a torre"
+            + (comManutencao ? " e fechamento de pistas" : "") + ", 8 aviões, 2 pistas, " + segundos + "s ===");
         RegistroDeEventos.setSilencioso(true);
 
         List<Pista> pistas = List.of(new Pista(1), new Pista(2));
@@ -125,6 +127,14 @@ public class TestePista {
             t.start();
         }
 
+        ControladorDeManutencao manutencao = null;
+        if (comManutencao) {
+            manutencao = new ControladorDeManutencao(pistas, torre, 200, 200);
+            Thread t = new Thread(manutencao, "manutencao");
+            threads.add(t);
+            t.start();
+        }
+
         long fim = System.currentTimeMillis() + segundos * 1000L;
         while (System.currentTimeMillis() < fim && primeiroErro.get() == null) {
             Thread.sleep(50);
@@ -134,7 +144,13 @@ public class TestePista {
         RegistroDeEventos.setSilencioso(false);
 
         RuntimeException erro = primeiroErro.get();
+        if (erro == null && manutencao != null && manutencao.getTotalFechamentos() == 0) {
+            throw new AssertionError("Nenhuma pista foi fechada durante o teste de manutenção");
+        }
         if (erro == null) {
+            if (manutencao != null) {
+                System.out.println("Pistas fechadas " + manutencao.getTotalFechamentos() + " vezes durante o teste.");
+            }
             System.out.println("OK: " + operacoes + " pousos/decolagens sem nenhuma condição de corrida."
                 + " O controle de concorrência está ativo.");
         } else {

@@ -18,11 +18,19 @@ import java.util.concurrent.atomic.AtomicReference;
  * "se o ocupante for null, coloque este avião; senão, falhe". Verificar e ocupar
  * acontecem num passo só, então dois aviões nunca conseguem os dois achar a pista
  * livre. Por isso a detecção funciona mesmo com os locks desligados.
+ *
+ * Fechamento (Extra 4): a pista pode ser fechada para manutenção ou por causa do clima.
+ * Fechada, ela não aparece como livre para a torre, que deixa de autorizar novos aviões nela.
+ * Um avião que já tinha sido autorizado antes do fechamento ainda termina a operação.
  */
 public class Pista {
 
     private final int numero;
     private final AtomicReference<Aviao> ocupante = new AtomicReference<>(null);
+
+    // volatile: quando uma thread fecha/reabre, as outras (torre, painel) veem na hora.
+    private volatile boolean fechada = false;
+    private volatile String motivoFechamento = null;
 
     public Pista(int numero) {
         if (numero <= 0) {
@@ -35,9 +43,30 @@ public class Pista {
         return numero;
     }
 
-    /** true se não há avião na pista. */
+    /** true se a pista está aberta e sem avião. É o que a torre consulta antes de autorizar. */
     public boolean estaLivre() {
-        return ocupante.get() == null;
+        return !fechada && ocupante.get() == null;
+    }
+
+    public boolean estaFechada() {
+        return fechada;
+    }
+
+    /** Motivo do fechamento (null se aberta). Usado pelo painel. */
+    public String getMotivoFechamento() {
+        return motivoFechamento;
+    }
+
+    /** Fecha a pista: a torre para de autorizar novos aviões nela. */
+    public void fechar(String motivo) {
+        motivoFechamento = motivo;
+        fechada = true;
+    }
+
+    /** Reabre a pista. Quem chamar deve avisar a torre (notificarPistaLiberada). */
+    public void reabrir() {
+        fechada = false;
+        motivoFechamento = null;
     }
 
     /** Avião que está na pista agora (null se livre). Usado pelo painel. */
@@ -80,6 +109,8 @@ public class Pista {
     @Override
     public String toString() {
         Aviao atual = ocupante.get();
-        return "Pista " + numero + (atual == null ? " [livre]" : " [ocupada por " + atual.getCodigoVoo() + "]");
+        String estado = atual == null ? "livre" : "ocupada por " + atual.getCodigoVoo();
+        if (fechada) estado = "FECHADA (" + motivoFechamento + ")" + (atual == null ? "" : ", ainda com " + atual.getCodigoVoo());
+        return "Pista " + numero + " [" + estado + "]";
     }
 }
