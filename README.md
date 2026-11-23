@@ -102,6 +102,21 @@ Quando uma pista fica livre, a torre decide nesta ordem:
 - Um avião nunca está nas duas filas ao mesmo tempo.
 - Só recebe autorização quem estava na fila; ninguém recebe duas autorizações seguidas.
 - Só pode concluir operação na pista o avião para quem a torre reservou aquela pista.
+- O avião precisa sair da pista (`pista.liberar`) **antes** de avisar a torre
+  (`concluirOperacao`); senão a torre daria a pista ao próximo com ele ainda em cima dela.
+- Ninguém sai da espera da torre sem ter recebido a própria autorização.
+
+### Avião interrompido enquanto espera
+
+Se a thread do avião for interrompida enquanto dorme na torre (ex.: fim da simulação, Ctrl+C),
+a torre desfaz o que tinha feito por ele:
+
+- se ele ainda estava na fila, sai da fila;
+- se a autorização já tinha sido concedida mas ele não chegou a buscá-la, a pista reservada
+  é devolvida e vai para o próximo da fila.
+
+Sem isso, uma pista poderia ficar reservada para sempre para um avião que nunca vai usá-la.
+Com uma pista só (cenário C2), o aeroporto inteiro pararia.
 
 ### Como testar
 
@@ -109,8 +124,12 @@ Quando uma pista fica livre, a torre decide nesta ordem:
 java -cp out aeroporto.torre.TesteTorre
 ```
 
-O teste 1 confere que a emergência fura a fila. O teste 2 roda 8 aviões em 2 pistas por
-5 segundos e falha se houver conflito de pista ou se alguma fila travar.
+| Teste | O que confere |
+|---|---|
+| 1 | A emergência fura a fila de pouso |
+| 2 | Um avião interrompido na fila sai dela e a pista continua disponível para os outros |
+| 3 | A torre barra quem tenta concluir a operação sem ter liberado a pista |
+| 4 | 8 aviões em 2 pistas por 5 segundos: falha se houver conflito de pista, se alguma fila não andar ou se o aeroporto ficar um segundo inteiro sem nenhuma operação (torre travada) |
 
 ---
 
@@ -297,6 +316,8 @@ Demais mecanismos: a preencher.
 | Marcação | Arquivo | O que acontece se comentar |
 |---|---|---|
 | `[CONTROLE-CONCORRENCIA #T1]` | `TorreDeControle.java`, método `despachar()` | A torre deixa de checar se já reservou a pista e entrega a mesma pista a dois aviões. A `Pista` detecta e lança `ExcecaoPistaOcupada`, ex.: *"Pista 1 já ocupada por G3 1450 quando AD 2774 tentou entrar nela"*. |
+| `[CONTROLE-CONCORRENCIA #T2]` | `TorreDeControle.java`, método `esperarAutorizacao()` | O avião não espera a vez dele: sai da torre logo depois de entrar na fila, sem autorização. A asserção em `pedir()` lança `ExcecaoAutorizacaoIndevida`, ex.: *"AD 2774 saiu da espera da torre sem ter recebido autorização de POUSO (ainda estava na fila)"*. Aparece no Teste 1 do `TesteTorre`. |
+| `[CONTROLE-CONCORRENCIA #T3]` | `TorreDeControle.java`, fim do método `despachar()` | A torre concede a pista mas não acorda ninguém (`signalAll`). Os aviões ficam dormindo para sempre no `await()`, a pista fica reservada sem uso e o aeroporto **trava**. Não gera exceção de pista, porque ninguém chega a usar a pista; o `TesteTorre` detecta o travamento e falha com *"A torre travou: ... continua dormindo no await()"*. É um exemplo de *lost wakeup* (sinal perdido). |
 
 Demais linhas: a preencher.
 
@@ -309,6 +330,10 @@ Demais linhas: a preencher.
 2. Compile e rode `java -cp out aeroporto.pista.TestePista`. O Teste 3 para quase
    imediatamente com `CONDIÇÃO DE CORRIDA DETECTADA` e a mensagem da `ExcecaoPistaOcupada`.
 3. Descomente a linha: os testes voltam a passar.
+
+Para a #T2 e a #T3, o procedimento é o mesmo: comente a linha logo abaixo da marcação e rode
+`java -cp out aeroporto.torre.TesteTorre`. Com a #T2, a exceção aparece logo no Teste 1;
+com a #T3, o Teste 1 acusa o travamento depois de 3 segundos.
 
 As verificações dentro da `Pista` (`compareAndSet`) **não** devem ser comentadas: elas não
 são o controle, são o detector. Sem elas, a falha aconteceria em silêncio.
