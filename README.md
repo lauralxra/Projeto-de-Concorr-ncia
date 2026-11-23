@@ -71,6 +71,8 @@ Avião usa a pista ─▶ pista.liberar() ─▶ torre.concluirOperacao() ─▶
 | `Autorizacao` | Bilhete imutável: avião + pista + tipo (pouso/decolagem) |
 | `TipoOperacao` | `POUSO` ou `DECOLAGEM` |
 | `ExcecaoAutorizacaoIndevida` | Asserções da torre (ver abaixo) |
+| `EstatisticasDaTorre` | Números da torre para o painel (Extra 6), imutável |
+| `RetratoDaTorre` | Foto consistente das filas e reservas num instante, imutável (base do Extra 7) |
 
 ### Política de prioridade
 
@@ -106,6 +108,48 @@ Quando uma pista fica livre, a torre decide nesta ordem:
   (`concluirOperacao`); senão a torre daria a pista ao próximo com ele ainda em cima dela.
 - Ninguém sai da espera da torre sem ter recebido a própria autorização.
 
+### O que a torre oferece ao painel (Pessoa 4)
+
+| Método | Devolve | Para quê |
+|---|---|---|
+| `getFilaDePouso()` / `getFilaDeDecolagem()` | Cópia de cada fila | Mostrar as filas no painel |
+| `getPistas()` | Cópia da lista de pistas | Mostrar o estado de cada pista |
+| `getReservas()` | Pista → texto da autorização | Mostrar quem a torre autorizou em cada pista |
+| `getRetrato()` | `RetratoDaTorre` | Filas e reservas lidas **todas no mesmo instante**, com a trava pega |
+| `getEstatisticas()` | `EstatisticasDaTorre` | Totais, esperas médias e ocupação das pistas (Extra 6) |
+
+**Por que o retrato existe:** chamando `getFilaDePouso()` e depois `getFilaDeDecolagem()`,
+um avião pode mudar de fila entre uma chamada e outra e aparecer nas duas (ou em nenhuma),
+sem ser erro de verdade. O retrato lê tudo de uma vez, então o que ele mostra é real.
+Ele tem `verificarConsistencia()`, que devolve a lista de problemas encontrados (vazia se
+estiver tudo certo): avião duplicado numa fila, avião nas duas filas, avião na fila e com pista
+reservada ao mesmo tempo, avião com duas pistas. O monitor de invariantes (Extra 7) pode
+chamar isso a cada ciclo.
+
+**Estatísticas (Extra 6)**, todas calculadas pela torre:
+
+| Número | Como é medido |
+|---|---|
+| `getTotalPousos()` / `getTotalDecolagens()` | Operações concluídas (`concluirOperacao`) |
+| `getEsperaMediaPousoMillis()` / `getEsperaMediaDecolagemMillis()` / `getEsperaMediaGeralMillis()` | Do momento em que o avião entra na fila até a torre conceder a pista |
+| `getMaiorEsperaMillis()` | A maior espera registrada até agora |
+| `getEmergenciasAtendidas()` | Aviões em emergência que receberam pista para pousar |
+| `getOcupacaoPercentual(pista)` | Tempo em que a pista ficou reservada ÷ tempo total da simulação |
+| `getOperacoesPorPista()` | Pousos + decolagens concluídos em cada pista |
+
+Exemplo de uso no painel:
+
+```java
+EstatisticasDaTorre est = torre.getEstatisticas();
+System.out.println(est); // "Pousos: 12 | Decolagens: 11 | Espera média: ... | Pista 1: 85% | ..."
+
+RetratoDaTorre r = torre.getRetrato();
+List<String> problemas = r.verificarConsistencia();
+```
+
+Os dois objetos são **imutáveis**: a torre os monta com a trava pega e entrega prontos,
+então o painel pode lê-los de qualquer thread sem lock e sem atrasar a torre.
+
 ### Avião interrompido enquanto espera
 
 Se a thread do avião for interrompida enquanto dorme na torre (ex.: fim da simulação, Ctrl+C),
@@ -129,7 +173,8 @@ java -cp out aeroporto.torre.TesteTorre
 | 1 | A emergência fura a fila de pouso |
 | 2 | Um avião interrompido na fila sai dela e a pista continua disponível para os outros |
 | 3 | A torre barra quem tenta concluir a operação sem ter liberado a pista |
-| 4 | 8 aviões em 2 pistas por 5 segundos: falha se houver conflito de pista, se alguma fila não andar ou se o aeroporto ficar um segundo inteiro sem nenhuma operação (torre travada) |
+| 4 | Estatísticas (totais, esperas, ocupação) e retrato da torre conferem com um cenário controlado |
+| 5 | 8 aviões em 2 pistas por 5 segundos: falha se houver conflito de pista, se alguma fila não andar ou se o aeroporto ficar um segundo inteiro sem nenhuma operação (torre travada). Ao mesmo tempo, um monitor tira retratos da torre sem parar e falha se algum avião aparecer em dois lugares; no fim, as estatísticas precisam bater com o que os aviões fizeram |
 
 ---
 
@@ -295,8 +340,8 @@ A preencher.
 | 3 | Combustível que diminui na espera | Aviões | A preencher |
 | 4 | Fechamento de pista (manutenção/clima) | Pistas | Pronto |
 | 5 | Portões de embarque | Pistas + Torre | Opcional, se der tempo |
-| 6 | Estatísticas no painel | Painel | A preencher |
-| 7 | Monitor de invariantes | Painel | A preencher |
+| 6 | Estatísticas no painel | Painel (dados vêm da Torre) | Dados prontos em `torre.getEstatisticas()`; falta exibir no painel |
+| 7 | Monitor de invariantes | Painel (retrato vem da Torre) | `torre.getRetrato().verificarConsistencia()` pronto; falta a thread do monitor |
 
 ## Mecanismos de concorrência não vistos em sala
 
