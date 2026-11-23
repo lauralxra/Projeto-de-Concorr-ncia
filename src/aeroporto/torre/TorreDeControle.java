@@ -88,6 +88,13 @@ public class TorreDeControle {
                     + ", mas a torre tinha reservado essa pista para "
                     + (reserva == null ? "ninguém" : reserva.getAviao().getCodigoVoo()));
             }
+            // Asserção: o avião precisa sair da pista (pista.liberar) ANTES de avisar a torre.
+            // Senão a torre daria a pista ao próximo com este avião ainda em cima dela.
+            if (pista.getOcupante() == aviao) {
+                throw new ExcecaoAutorizacaoIndevida(aviao.getCodigoVoo()
+                    + " avisou a torre que terminou, mas ainda está ocupando a pista "
+                    + pista.getNumero() + " (faltou chamar pista.liberar antes de concluirOperacao)");
+            }
             pistasReservadas.remove(pista);
             RegistroDeEventos.publicar("Torre: pista " + pista.getNumero()
                 + " liberada por " + aviao.getCodigoVoo());
@@ -154,13 +161,55 @@ public class TorreDeControle {
 
             despachar();
 
-            // Espera até a autorização DESTE avião aparecer.
-            while (!autorizacoesPendentes.containsKey(aviao)) {
-                autorizacaoDisponivel.await();
+            try {
+                esperarAutorizacao(aviao);
+            } catch (InterruptedException e) {
+                desistir(aviao, tipo);
+                throw e;
             }
-            return autorizacoesPendentes.remove(aviao);
+
+            Autorizacao aut = autorizacoesPendentes.remove(aviao);
+            // Asserção: ninguém sai da espera sem ter recebido a sua autorização.
+            if (aut == null) {
+                throw new ExcecaoAutorizacaoIndevida(aviao.getCodigoVoo() + " saiu da espera da torre sem"
+                    + " ter recebido autorização de " + tipo + " (ainda estava na "
+                    + (filaDe(tipo).contem(aviao) ? "fila" : "torre") + ")");
+            }
+            return aut;
         } finally {
             trava.unlock();
+        }
+    }
+
+    /**
+     * Dorme até a autorização DESTE avião aparecer no mapa.
+     * O while (e não if) protege contra acordar à toa: signalAll acorda todos,
+     * e cada um confere se a autorização é sua.
+     * Só pode ser chamado com a trava pega.
+     */
+    private void esperarAutorizacao(Aviao aviao) throws InterruptedException {
+        // [CONTROLE-CONCORRENCIA #T2] Comentar esta linha faz o avião sair da torre sem
+        // esperar a vez; a asserção em pedir() lança ExcecaoAutorizacaoIndevida.
+        while (!autorizacoesPendentes.containsKey(aviao)) autorizacaoDisponivel.await();
+    }
+
+    /**
+     * O avião foi interrompido enquanto esperava (ex.: fim da simulação, Ctrl+C).
+     * Desfaz o que a torre tinha feito por ele, senão uma pista poderia ficar
+     * reservada para sempre para um avião que nunca vai usá-la.
+     * Só pode ser chamado com a trava pega.
+     */
+    private void desistir(Aviao aviao, TipoOperacao tipo) {
+        if (filaDe(tipo).remover(aviao)) {
+            RegistroDeEventos.publicar("Torre: " + aviao.getCodigoVoo() + " saiu da fila (interrompido)");
+            return;
+        }
+        Autorizacao aut = autorizacoesPendentes.remove(aviao);
+        if (aut != null) {
+            pistasReservadas.remove(aut.getPista());
+            RegistroDeEventos.publicar("Torre: " + aviao.getCodigoVoo() + " desistiu de " + tipo
+                + "; pista " + aut.getPista().getNumero() + " devolvida");
+            despachar(); // a pista devolvida pode ir para o próximo da fila
         }
     }
 
@@ -202,9 +251,9 @@ public class TorreDeControle {
             RegistroDeEventos.publicar("Torre: autorizado " + aut);
         }
 
-        if (concedeuAlguma) {
-            autorizacaoDisponivel.signalAll();
-        }
+        // [CONTROLE-CONCORRENCIA #T3] Comentar esta linha faz a torre conceder a pista sem
+        // acordar ninguém: os aviões dormem para sempre no await() e o aeroporto trava.
+        if (concedeuAlguma) autorizacaoDisponivel.signalAll();
     }
 
     /** Decide se a próxima pista vai para um pouso ou uma decolagem. */
