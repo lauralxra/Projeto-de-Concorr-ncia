@@ -16,9 +16,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  *  Teste 1: emergência fura a fila de pouso.
  *  Teste 2: avião interrompido na fila sai dela e não prende a pista.
  *  Teste 3: concluir a operação sem liberar a pista é barrado pela torre.
- *  Teste 4: estresse — 8 aviões, 2 pistas, ciclo pouso/decolagem por alguns segundos.
+ *  Teste 4: estatísticas (totais, esperas, ocupação) e retrato consistente da torre.
+ *  Teste 5: estresse — 8 aviões, 2 pistas, ciclo pouso/decolagem por alguns segundos.
  *           Se dois aviões caírem na mesma pista, a Pista lança exceção e o teste falha.
  *           Se as operações pararem de acontecer, a torre travou e o teste falha.
+ *           Um monitor tira retratos o tempo todo e falha se algum avião estiver em dois lugares.
  */
 public class TesteTorre {
 
@@ -26,6 +28,7 @@ public class TesteTorre {
         testeEmergencia();
         testeInterrupcaoNaFila();
         testeConcluirSemLiberar();
+        testeEstatisticas();
         testeEstresse(5);
         System.out.println("\nTODOS OS TESTES DA TORRE PASSARAM");
     }
@@ -151,7 +154,7 @@ public class TesteTorre {
     }
 
     static void testeEstresse(int segundos) throws Exception {
-        System.out.println("\n=== Teste 4: estresse, 8 aviões, 2 pistas, " + segundos + "s ===");
+        System.out.println("\n=== Teste 5: estresse, 8 aviões, 2 pistas, " + segundos + "s ===");
         RegistroDeEventos.setSilencioso(true);
 
         List<Pista> pistas = List.of(new Pista(1), new Pista(2));
@@ -190,6 +193,26 @@ public class TesteTorre {
             t.start();
         }
 
+        // Monitor: tira retratos da torre o tempo todo, enquanto os aviões mexem nela,
+        // e confere que nenhum avião aparece em dois lugares (o que o Extra 7 vai fazer).
+        AtomicInteger retratos = new AtomicInteger();
+        Thread monitor = new Thread(() -> {
+            while (rodando.get()) {
+                RetratoDaTorre r = torre.getRetrato();
+                List<String> problemas = r.verificarConsistencia();
+                if (!problemas.isEmpty() || r.getTotalDeAvioes() > voos.length) {
+                    synchronized (erros) {
+                        erros.add(new AssertionError("Retrato inconsistente: " + problemas + " em " + r));
+                    }
+                    return;
+                }
+                retratos.incrementAndGet();
+                try { Thread.sleep(1); } catch (InterruptedException e) { return; }
+            }
+        }, "monitor");
+        threads.add(monitor);
+        monitor.start();
+
         // Confere a cada segundo se o aeroporto continua andando.
         // Se nenhuma operação acontecer em um segundo inteiro, a torre travou
         // (ex.: [CONTROLE-CONCORRENCIA #T3] comentada: aviões dormindo para sempre).
@@ -219,7 +242,70 @@ public class TesteTorre {
             throw new AssertionError("Alguma fila travou (starvation): pousos=" + pousos
                 + " decolagens=" + decolagens);
         }
+        EstatisticasDaTorre est = torre.getEstatisticas();
+        if (est.getTotalPousos() != pousos.get() || est.getTotalDecolagens() != decolagens.get()) {
+            throw new AssertionError("Estatísticas da torre não batem com o que os aviões fizeram: torre diz "
+                + est.getTotalPousos() + "/" + est.getTotalDecolagens() + ", aviões fizeram "
+                + pousos + "/" + decolagens);
+        }
         System.out.println("OK: " + pousos + " pousos e " + decolagens
             + " decolagens sem nenhum conflito de pista");
+        System.out.println("OK: " + retratos + " retratos consistentes tirados durante o teste");
+        System.out.println("Estatísticas: " + est);
+    }
+
+    static void testeEstatisticas() throws Exception {
+        System.out.println("\n=== Teste 4: estatísticas da torre ===");
+        Pista pista = new Pista(1);
+        TorreDeControle torre = new TorreDeControle(List.of(pista), 60_000, 3);
+
+        // LA 3302 pega a pista e fica nela 200 ms; AD 2774 espera esse tempo na fila.
+        Aviao primeiro = new Aviao("LA 3302");
+        Autorizacao aut = torre.pedirPouso(primeiro);
+        pista.ocupar(primeiro);
+
+        Aviao segundo = new Aviao("AD 2774");
+        segundo.setEmergencia(true);
+        Thread t = new Thread(() -> {
+            try {
+                Autorizacao a2 = torre.pedirDecolagem(segundo);
+                a2.getPista().ocupar(segundo);
+                a2.getPista().liberar(segundo);
+                torre.concluirOperacao(segundo, a2.getPista());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, "AD 2774");
+        t.start();
+        Thread.sleep(50);
+
+        RetratoDaTorre r = torre.getRetrato();
+        if (!r.getFilaDeDecolagem().contains(segundo) || r.getAviaoNaPista(1) != primeiro) {
+            throw new AssertionError("Retrato errado: " + r);
+        }
+
+        Thread.sleep(150);
+        pista.liberar(primeiro);
+        torre.concluirOperacao(primeiro, aut.getPista());
+        esperarOuFalhar(t);
+
+        EstatisticasDaTorre est = torre.getEstatisticas();
+        System.out.println(est);
+        if (est.getTotalPousos() != 1 || est.getTotalDecolagens() != 1) {
+            throw new AssertionError("Esperava 1 pouso e 1 decolagem: " + est);
+        }
+        if (est.getEsperaMediaPousoMillis() > 50) {
+            throw new AssertionError("LA 3302 não esperou nada, média de pouso deveria ser ~0: " + est);
+        }
+        if (est.getEsperaMediaDecolagemMillis() < 150) {
+            throw new AssertionError("AD 2774 esperou ~200 ms, média de decolagem veio baixa: " + est);
+        }
+        if (est.getEmergenciasAtendidas() != 0) {
+            throw new AssertionError("Emergência só conta em pouso, não em decolagem: " + est);
+        }
+        if (est.getOperacoesPorPista().get(1) != 2 || est.getOcupacaoPercentual(1) <= 0) {
+            throw new AssertionError("Pista 1 deveria ter 2 operações e ocupação > 0: " + est);
+        }
+        System.out.println("OK: totais, esperas e ocupação da pista conferem");
     }
 }

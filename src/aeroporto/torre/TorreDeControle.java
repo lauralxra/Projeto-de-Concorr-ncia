@@ -50,6 +50,21 @@ public class TorreDeControle {
 
     private int pousosSeguidos = 0;
 
+    // --- Estatísticas (Extra 6). Todas protegidas pela mesma trava. ---
+    private final long inicioMillis = System.currentTimeMillis();
+    /** Instante em que cada avião que está esperando fez o pedido. */
+    private final Map<Aviao, Long> pedidoEmMillis = new HashMap<>();
+    private int totalPousos = 0;
+    private int totalDecolagens = 0;
+    private int autorizacoesPouso = 0;
+    private int autorizacoesDecolagem = 0;
+    private long somaEsperaPousoMillis = 0;
+    private long somaEsperaDecolagemMillis = 0;
+    private long maiorEsperaMillis = 0;
+    private int emergenciasAtendidas = 0;
+    private final Map<Integer, Long> tempoReservadoPorPista = new HashMap<>();
+    private final Map<Integer, Integer> operacoesPorPista = new HashMap<>();
+
     public TorreDeControle(List<Pista> pistas, long limiteAgingMillis, int limitePousosSeguidos) {
         if (pistas == null || pistas.isEmpty()) {
             throw new IllegalArgumentException("A torre precisa de pelo menos uma pista");
@@ -58,6 +73,10 @@ public class TorreDeControle {
         this.filaDePouso = new FilaDePouso(limiteAgingMillis);
         this.filaDeDecolagem = new FilaDeDecolagem(limiteAgingMillis);
         this.limitePousosSeguidos = Math.max(1, limitePousosSeguidos);
+        for (Pista p : this.pistas) {
+            tempoReservadoPorPista.put(p.getNumero(), 0L);
+            operacoesPorPista.put(p.getNumero(), 0);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -96,6 +115,7 @@ public class TorreDeControle {
                     + pista.getNumero() + " (faltou chamar pista.liberar antes de concluirOperacao)");
             }
             pistasReservadas.remove(pista);
+            contabilizarOperacao(reserva);
             RegistroDeEventos.publicar("Torre: pista " + pista.getNumero()
                 + " liberada por " + aviao.getCodigoVoo());
             despachar();
@@ -142,9 +162,66 @@ public class TorreDeControle {
         }
     }
 
+    /**
+     * Foto consistente das filas e reservas, tirada toda de uma vez com a trava pega.
+     * Use isto (e não getFilaDePouso + getFilaDeDecolagem separados) quando precisar
+     * comparar uma coisa com a outra, como no monitor de invariantes (Extra 7).
+     */
+    public RetratoDaTorre getRetrato() {
+        trava.lock();
+        try {
+            Map<Integer, Autorizacao> reservas = new HashMap<>();
+            for (Map.Entry<Pista, Autorizacao> e : pistasReservadas.entrySet()) {
+                reservas.put(e.getKey().getNumero(), e.getValue());
+            }
+            return new RetratoDaTorre(System.currentTimeMillis(),
+                filaDePouso.copia(), filaDeDecolagem.copia(), reservas);
+        } finally {
+            trava.unlock();
+        }
+    }
+
+    /** Estatísticas para o painel (Extra 6): totais, esperas médias e ocupação das pistas. */
+    public EstatisticasDaTorre getEstatisticas() {
+        trava.lock();
+        try {
+            return new EstatisticasDaTorre(inicioMillis, System.currentTimeMillis(),
+                totalPousos, totalDecolagens, autorizacoesPouso, autorizacoesDecolagem,
+                somaEsperaPousoMillis, somaEsperaDecolagemMillis, maiorEsperaMillis,
+                emergenciasAtendidas, tempoReservadoPorPista, operacoesPorPista);
+        } finally {
+            trava.unlock();
+        }
+    }
+
     // ------------------------------------------------------------------
     // Interno
     // ------------------------------------------------------------------
+
+    /** Registra quanto o avião esperou na fila até ganhar a pista. Trava pega. */
+    private void contabilizarEspera(Autorizacao aut) {
+        Long pedido = pedidoEmMillis.remove(aut.getAviao());
+        if (pedido == null) return;
+        long espera = aut.getConcedidaEmMillis() - pedido;
+        if (aut.getTipo() == TipoOperacao.POUSO) {
+            autorizacoesPouso++;
+            somaEsperaPousoMillis += espera;
+            if (aut.getAviao().estaEmEmergencia()) emergenciasAtendidas++;
+        } else {
+            autorizacoesDecolagem++;
+            somaEsperaDecolagemMillis += espera;
+        }
+        maiorEsperaMillis = Math.max(maiorEsperaMillis, espera);
+    }
+
+    /** Registra uma operação concluída e quanto tempo a pista ficou reservada. Trava pega. */
+    private void contabilizarOperacao(Autorizacao aut) {
+        if (aut.getTipo() == TipoOperacao.POUSO) totalPousos++; else totalDecolagens++;
+        int numero = aut.getPista().getNumero();
+        long uso = System.currentTimeMillis() - aut.getConcedidaEmMillis();
+        tempoReservadoPorPista.merge(numero, uso, Long::sum);
+        operacoesPorPista.merge(numero, 1, Integer::sum);
+    }
 
     private Autorizacao pedir(Aviao aviao, TipoOperacao tipo) throws InterruptedException {
         trava.lock();
@@ -155,6 +232,7 @@ public class TorreDeControle {
                     + " pediu " + tipo + " mas já estava em uma fila da torre");
             }
             filaDe(tipo).entrar(aviao);
+            pedidoEmMillis.put(aviao, System.currentTimeMillis());
             RegistroDeEventos.publicar("Torre: " + aviao.getCodigoVoo() + " entrou na "
                 + (tipo == TipoOperacao.POUSO ? "fila de pouso" : "fila de decolagem")
                 + (aviao.estaEmEmergencia() ? " (EMERGÊNCIA)" : ""));
@@ -201,6 +279,7 @@ public class TorreDeControle {
      */
     private void desistir(Aviao aviao, TipoOperacao tipo) {
         if (filaDe(tipo).remover(aviao)) {
+            pedidoEmMillis.remove(aviao);
             RegistroDeEventos.publicar("Torre: " + aviao.getCodigoVoo() + " saiu da fila (interrompido)");
             return;
         }
@@ -246,6 +325,7 @@ public class TorreDeControle {
             pistasReservadas.put(pista, aut);
             autorizacoesPendentes.put(escolhido, aut);
             pousosSeguidos = (tipo == TipoOperacao.POUSO) ? pousosSeguidos + 1 : 0;
+            contabilizarEspera(aut);
             concedeuAlguma = true;
 
             RegistroDeEventos.publicar("Torre: autorizado " + aut);
