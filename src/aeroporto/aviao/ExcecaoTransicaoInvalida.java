@@ -1,7 +1,7 @@
 package aeroporto.aviao;
 /**
- * para quando o avião tenta pular uma etapa ciclo de vida
- * ExcecaoTrasicaoInvalida
+ * para quando o avião tenta pular uma etapa no ciclo de vida
+ * ExcecaoTransicaoInvalida
  */
 public class ExcecaoTransicaoInvalida extends RuntimeException {
     public ExcecaoTransicaoInvalida(String codigoVoo, EstadoAviao estadoAtual, EstadoAviao pretendido) {
