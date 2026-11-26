@@ -1,8 +1,12 @@
 package aeroporto.gui;
 
 import aeroporto.aviao.Aviao;
+import aeroporto.aviao.EstadoAviao;
+import aeroporto.aviao.GeradorDeVoos;
 import aeroporto.config.Configuracao;
+import aeroporto.config.LeitorDeConfiguracao;
 import aeroporto.monitor.MonitorDeInvariantes;
+import aeroporto.pista.ControladorDeManutencao;
 import aeroporto.pista.Pista;
 import aeroporto.registro.RegistroDeEventos;
 import aeroporto.torre.EstatisticasDaTorre;
@@ -13,22 +17,30 @@ import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
 import java.awt.*;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
 /**
  * Interface gráfica completa em Java Swing com visual moderno escuro (Cockpit ATC).
- * Permite visualizar e interagir com o simulador de aeroporto concorrente.
+ * Permite visualizar, interagir e alternar entre cenários da simulação em tempo real.
  */
 public class JanelaSimuladorSwing extends JFrame {
 
-    private final Configuracao config;
-    private final TorreDeControle torre;
-    private final List<Pista> pistas;
-    private final List<Aviao> todosAvioes;
-    private final MonitorDeInvariantes monitor;
+    private volatile Configuracao config;
+    private volatile TorreDeControle torre;
+    private volatile List<Pista> pistas;
+    private volatile List<Aviao> todosAvioes;
+    private volatile MonitorDeInvariantes monitor;
 
-    // Elementos da UI
+    // Gerenciamento das threads em execução no cenário ativo
+    private final List<Thread> threadsAtivas = new ArrayList<>();
+
+    // Componentes gráficos
+    private PainelRadar2D painelRadar;
+    private JLabel lblSub;
     private JLabel lblTempo;
     private JLabel lblStatusInvariantes;
     private JLabel lblTotalPousos;
@@ -37,8 +49,10 @@ public class JanelaSimuladorSwing extends JFrame {
     private JLabel lblEsperaPouso;
     private JLabel lblEsperaDecolagem;
     private JLabel lblVazao;
+    private JPanel pnlBarrasPistasContainer;
     private JProgressBar[] barrasPistas;
     private JTextArea txtLogs;
+    private JComboBox<String> comboCenarios;
 
     private static final Color BG_DARK = new Color(13, 17, 23);
     private static final Color BG_CARD = new Color(22, 27, 34);
@@ -49,40 +63,52 @@ public class JanelaSimuladorSwing extends JFrame {
     private static final Color ACCENT_RED = new Color(248, 81, 73);
     private static final Color ACCENT_YELLOW = new Color(210, 153, 34);
 
+    /**
+     * Construtor principal que inicializa o simulador pelo identificador de cenário ("C1", "C2").
+     */
+    public JanelaSimuladorSwing(String cenarioInicial) {
+        configurarJanela();
+        montarComponentesBasicos();
+        trocarCenario(cenarioInicial != null ? cenarioInicial : "C1");
+        iniciarAtualizadorUI();
+    }
+
+    /**
+     * Construtor de compatibilidade.
+     */
     public JanelaSimuladorSwing(
             Configuracao config,
             TorreDeControle torre,
             List<Pista> pistas,
             List<Aviao> todosAvioes,
             MonitorDeInvariantes monitor) {
-
-        this.config = config;
-        this.torre = torre;
-        this.pistas = pistas;
-        this.todosAvioes = todosAvioes;
-        this.monitor = monitor;
-
-        configurarJanela();
-        montarComponentes();
-        iniciarAtualizadorUI();
+        this(config != null ? config.getNomeCenario() : "C1");
     }
 
     private void configurarJanela() {
         setTitle("✈ Simulador de Aeroporto Concorrente — Painel Gráfico ATC");
-        setSize(1280, 820);
-        setMinimumSize(new Dimension(1024, 700));
+        setSize(1300, 840);
+        setMinimumSize(new Dimension(1080, 720));
         setLocationRelativeTo(null);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         getContentPane().setBackground(BG_DARK);
         setLayout(new BorderLayout(8, 8));
+
+        // Encerramento limpo das threads ao fechar a janela
+        addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                interromperThreadsAtivas();
+            }
+        });
     }
 
-    private void montarComponentes() {
-        // 1. Barra Superior (Controles e Status)
+    private void montarComponentesBasicos() {
+        // 1. Barra Superior (Controles, Seletor de Cenários e Status)
         add(criarBarraSuperior(), BorderLayout.NORTH);
 
-        // 2. Centro: Radar e Pistas em 2D
-        PainelRadar2D painelRadar = new PainelRadar2D(torre, pistas, todosAvioes);
+        // 2. Centro: Radar e Pistas em 2D (inicialmente com listas vazias, atualizadas em trocarCenario)
+        painelRadar = new PainelRadar2D(torre, new ArrayList<>(), new ArrayList<>());
         add(painelRadar, BorderLayout.CENTER);
 
         // 3. Lado Direito: Dashboard de Estatísticas
@@ -97,7 +123,7 @@ public class JanelaSimuladorSwing extends JFrame {
         barra.setBackground(BG_CARD);
         barra.setBorder(BorderFactory.createCompoundBorder(
                 new LineBorder(new Color(48, 54, 61), 1),
-                new EmptyBorder(12, 16, 12, 16)
+                new EmptyBorder(10, 16, 10, 16)
         ));
 
         // Título e Cenário
@@ -107,23 +133,42 @@ public class JanelaSimuladorSwing extends JFrame {
         lblTitulo.setFont(new Font("SansSerif", Font.BOLD, 16));
         lblTitulo.setForeground(TEXT_WHITE);
 
-        JLabel lblSub = new JLabel("Cenário: " + config.getNomeCenario());
+        lblSub = new JLabel("Carregando cenário...");
         lblSub.setFont(new Font("SansSerif", Font.PLAIN, 12));
         lblSub.setForeground(TEXT_MUTED);
 
         pnlTitulo.add(lblTitulo);
         pnlTitulo.add(lblSub);
 
-        // Botões de Interatividade
-        JPanel pnlBotoes = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
-        pnlBotoes.setOpaque(false);
+        // Controles de Ação, Cenários e Relógio
+        JPanel pnlControles = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
+        pnlControles.setOpaque(false);
+
+        // Seletor de Cenários (Dropdown)
+        JLabel lblTrocar = new JLabel("Cenário:");
+        lblTrocar.setFont(new Font("SansSerif", Font.BOLD, 12));
+        lblTrocar.setForeground(TEXT_MUTED);
+
+        String[] opcoes = {
+            "C1 - Balanceado (2 pistas, 6 aviões)",
+            "C2 - Pista Única (1 pista, 4 pousos)"
+        };
+        comboCenarios = new JComboBox<>(opcoes);
+        comboCenarios.setFont(new Font("SansSerif", Font.BOLD, 12));
+        comboCenarios.setBackground(new Color(33, 38, 45));
+        comboCenarios.setForeground(TEXT_WHITE);
+        comboCenarios.setFocusable(false);
+        comboCenarios.addActionListener(e -> {
+            int idx = comboCenarios.getSelectedIndex();
+            trocarCenario(idx == 0 ? "C1" : "C2");
+        });
 
         lblTempo = new JLabel("00:00");
-        lblTempo.setFont(new Font("Monospaced", Font.BOLD, 18));
+        lblTempo.setFont(new Font("Monospaced", Font.BOLD, 16));
         lblTempo.setForeground(ACCENT_YELLOW);
         lblTempo.setBorder(BorderFactory.createCompoundBorder(
                 new LineBorder(new Color(48, 54, 61), 1),
-                new EmptyBorder(4, 10, 4, 10)
+                new EmptyBorder(4, 8, 4, 8)
         ));
 
         lblStatusInvariantes = new JLabel("● INVARIANTES OK");
@@ -142,13 +187,15 @@ public class JanelaSimuladorSwing extends JFrame {
         estilizarBotao(btnManutencao, ACCENT_YELLOW);
         btnManutencao.addActionListener(e -> alternarFechamentoPista());
 
-        pnlBotoes.add(lblStatusInvariantes);
-        pnlBotoes.add(btnEmergencia);
-        pnlBotoes.add(btnManutencao);
-        pnlBotoes.add(lblTempo);
+        pnlControles.add(lblTrocar);
+        pnlControles.add(comboCenarios);
+        pnlControles.add(lblStatusInvariantes);
+        pnlControles.add(btnEmergencia);
+        pnlControles.add(btnManutencao);
+        pnlControles.add(lblTempo);
 
         barra.add(pnlTitulo, BorderLayout.WEST);
-        barra.add(pnlBotoes, BorderLayout.EAST);
+        barra.add(pnlControles, BorderLayout.EAST);
 
         return barra;
     }
@@ -221,14 +268,27 @@ public class JanelaSimuladorSwing extends JFrame {
         pnl.add(lblSecaoPistas);
         pnl.add(Box.createVerticalStrut(8));
 
+        pnlBarrasPistasContainer = new JPanel();
+        pnlBarrasPistasContainer.setLayout(new BoxLayout(pnlBarrasPistasContainer, BoxLayout.Y_AXIS));
+        pnlBarrasPistasContainer.setOpaque(false);
+        pnlBarrasPistasContainer.setAlignmentX(Component.LEFT_ALIGNMENT);
+        pnl.add(pnlBarrasPistasContainer);
+
+        pnl.add(Box.createVerticalGlue());
+        return pnl;
+    }
+
+    private void reconstruirBarrasPistas() {
+        pnlBarrasPistasContainer.removeAll();
         barrasPistas = new JProgressBar[pistas.size()];
+
         for (int i = 0; i < pistas.size(); i++) {
             Pista p = pistas.get(i);
             JLabel lblPista = new JLabel("Pista " + p.getNumero());
             lblPista.setFont(new Font("SansSerif", Font.BOLD, 11));
             lblPista.setForeground(TEXT_WHITE);
             lblPista.setAlignmentX(Component.LEFT_ALIGNMENT);
-            pnl.add(lblPista);
+            pnlBarrasPistasContainer.add(lblPista);
 
             JProgressBar bar = new JProgressBar(0, 100);
             bar.setValue(0);
@@ -240,12 +300,12 @@ public class JanelaSimuladorSwing extends JFrame {
             bar.setAlignmentX(Component.LEFT_ALIGNMENT);
             barrasPistas[i] = bar;
 
-            pnl.add(bar);
-            pnl.add(Box.createVerticalStrut(6));
+            pnlBarrasPistasContainer.add(bar);
+            pnlBarrasPistasContainer.add(Box.createVerticalStrut(6));
         }
 
-        pnl.add(Box.createVerticalGlue());
-        return pnl;
+        pnlBarrasPistasContainer.revalidate();
+        pnlBarrasPistasContainer.repaint();
     }
 
     private JPanel criarCardMetrica(String titulo, JLabel lblValor, Color corValor) {
@@ -303,9 +363,111 @@ public class JanelaSimuladorSwing extends JFrame {
         btn.setFocusPainted(false);
         btn.setBorder(BorderFactory.createCompoundBorder(
                 new LineBorder(corDestaque, 1),
-                new EmptyBorder(6, 12, 6, 12)
+                new EmptyBorder(5, 10, 5, 10)
         ));
         btn.setCursor(new Cursor(Cursor.HAND_CURSOR));
+    }
+
+    /**
+     * Alterna o cenário dinamicamente: interrompe as threads anteriores com segurança
+     * e instancia o novo cenário com novas pistas, torre e aviões.
+     */
+    public synchronized void trocarCenario(String idCenario) {
+        interromperThreadsAtivas();
+
+        this.config = LeitorDeConfiguracao.carregar(idCenario);
+        lblSub.setText("Cenário: " + config.getNomeCenario());
+
+        // 1. Cria novas pistas
+        List<Pista> novasPistas = new ArrayList<>();
+        for (int i = 1; i <= config.getNumeroPistas(); i++) {
+            novasPistas.add(new Pista(i));
+        }
+        this.pistas = novasPistas;
+
+        // 2. Cria nova torre
+        this.torre = new TorreDeControle(
+                novasPistas,
+                config.getLimiteAgingMillis(),
+                config.getLimitePousosSeguidos()
+        );
+
+        // 3. Cria novos aviões
+        GeradorDeVoos gerador = new GeradorDeVoos();
+        List<Aviao> novosAvioes = new ArrayList<>();
+
+        for (int i = 0; i < config.getAvioesPousoInicial(); i++) {
+            String codigo = gerador.gerarCodigo();
+            novosAvioes.add(new Aviao(
+                    codigo,
+                    EstadoAviao.EM_VOO,
+                    torre,
+                    config.getDelaySoloMillis(),
+                    config.getDelayVooMillis(),
+                    config.getDelayOperacaoMillis(),
+                    config.getAutonomiaMillis(),
+                    config.getLimiteEmergencia()
+            ));
+        }
+
+        for (int i = 0; i < config.getAvioesDecolagemInicial(); i++) {
+            String codigo = gerador.gerarCodigo();
+            novosAvioes.add(new Aviao(
+                    codigo,
+                    EstadoAviao.EM_SOLO,
+                    torre,
+                    config.getDelaySoloMillis(),
+                    config.getDelayVooMillis(),
+                    config.getDelayOperacaoMillis(),
+                    config.getAutonomiaMillis(),
+                    config.getLimiteEmergencia()
+            ));
+        }
+        this.todosAvioes = novosAvioes;
+
+        // 4. Cria novo monitor de invariantes
+        this.monitor = new MonitorDeInvariantes(novosAvioes, torre, 300);
+
+        // 5. Controlador de manutenção
+        ControladorDeManutencao man = null;
+        if (config.isAtivarManutencao() && novasPistas.size() > 1) {
+            man = new ControladorDeManutencao(
+                    novasPistas,
+                    torre,
+                    config.getManutencaoIntervaloMillis(),
+                    config.getManutencaoDuracaoMillis()
+            );
+        }
+
+        // 6. Atualiza a tela gráfica 2D e as barras laterais
+        painelRadar.atualizarCenario(torre, pistas, todosAvioes);
+        reconstruirBarrasPistas();
+
+        // 7. Inicia as novas threads concorrentes
+        Thread tMon = new Thread(monitor, "Thread-MonitorInvariantes");
+        tMon.start();
+        threadsAtivas.add(tMon);
+
+        if (man != null) {
+            Thread tMan = new Thread(man, "Thread-ManutencaoPistas");
+            tMan.start();
+            threadsAtivas.add(tMan);
+        }
+
+        for (Aviao a : novosAvioes) {
+            Thread tAv = new Thread(a, "Thread-Aviao-" + a.getCodigoVoo());
+            tAv.start();
+            threadsAtivas.add(tAv);
+        }
+
+        RegistroDeEventos.publicar("SISTEMA: Carregado cenário " + config.getNomeCenario());
+    }
+
+    private synchronized void interromperThreadsAtivas() {
+        for (Thread t : threadsAtivas) {
+            t.interrupt();
+        }
+        threadsAtivas.clear();
     }
 
     private void iniciarAtualizadorUI() {
@@ -314,6 +476,8 @@ public class JanelaSimuladorSwing extends JFrame {
     }
 
     private void atualizarDados() {
+        if (torre == null) return;
+
         EstatisticasDaTorre est = torre.getEstatisticas();
         if (est != null) {
             long seg = est.getTempoDecorridoMillis() / 1000;
@@ -329,11 +493,13 @@ public class JanelaSimuladorSwing extends JFrame {
             lblEsperaPouso.setText(String.format("🛬 Fila de Pouso: %.2fs", est.getEsperaMediaPousoMillis() / 1000.0));
             lblEsperaDecolagem.setText(String.format("🛫 Fila de Decolagem: %.2fs", est.getEsperaMediaDecolagemMillis() / 1000.0));
 
-            for (int i = 0; i < pistas.size(); i++) {
-                int num = pistas.get(i).getNumero();
-                double oc = est.getOcupacaoPercentual(num);
-                barrasPistas[i].setValue((int) oc);
-                barrasPistas[i].setString(String.format("%.1f%%", oc));
+            if (barrasPistas != null) {
+                for (int i = 0; i < Math.min(barrasPistas.length, pistas.size()); i++) {
+                    int num = pistas.get(i).getNumero();
+                    double oc = est.getOcupacaoPercentual(num);
+                    barrasPistas[i].setValue((int) oc);
+                    barrasPistas[i].setString(String.format("%.1f%%", oc));
+                }
             }
         }
 
@@ -358,6 +524,7 @@ public class JanelaSimuladorSwing extends JFrame {
     }
 
     private void injetarEmergenciaManual() {
+        if (torre == null) return;
         RetratoDaTorre r = torre.getRetrato();
         List<Aviao> fila = r.getFilaDePouso();
         if (!fila.isEmpty()) {

@@ -17,9 +17,9 @@ import java.util.List;
  */
 public class PainelRadar2D extends JPanel {
 
-    private final TorreDeControle torre;
-    private final List<Pista> pistas;
-    private final List<Aviao> todosAvioes;
+    private volatile TorreDeControle torre;
+    private volatile List<Pista> pistas;
+    private volatile List<Aviao> todosAvioes;
 
     // Cores temáticas de Cockpit / ATC escuro
     private static final Color BG_RADAR = new Color(13, 17, 23);
@@ -50,6 +50,14 @@ public class PainelRadar2D extends JPanel {
             repaint();
         });
         timer.start();
+    }
+
+    public void atualizarCenario(TorreDeControle novaTorre, List<Pista> novasPistas, List<Aviao> novosAvioes) {
+        this.torre = novaTorre;
+        this.pistas = List.copyOf(novasPistas);
+        this.todosAvioes = List.copyOf(novosAvioes);
+        this.animacaoPistaOffset = 0;
+        repaint();
     }
 
     @Override
