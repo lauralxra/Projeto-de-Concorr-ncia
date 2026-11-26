@@ -494,17 +494,63 @@ Classe `Simulador` que contém o método `main`:
 
 ---
 
-## Extras implementados
+## Extras implementados (Equipe de 4)
 
-| Extra | Descrição | Módulo | Situação |
-|---|---|---|---|
-| 1 | Emergência fura a fila de pouso | Torre | Pronto |
-| 2 | Anti-starvation (aging) | Torre | Pronto |
-| 3 | Combustível que diminui na espera | Aviões | Pronto |
-| 4 | Fechamento de pista (manutenção/clima) | Pistas | Pronto |
-| 5 | Portões de embarque | Pistas + Torre | Opcional, se der tempo |
-| 6 | Estatísticas no painel | Painel (dados da Torre) | Pronto |
-| 7 | Monitor de invariantes | Painel (retrato da Torre) | Pronto |
+Como a equipe possui 4 integrantes, o projeto atende a todos os requisitos extras estipulados no enunciado, distribuídos entre os membros:
+
+| Extra | Descrição | Dono | Mecanismo Principal | Situação |
+|---|---|---|---|---|
+| **1** | Emergência fura a fila de pouso | Pessoa 1 (Torre) | `FilaDeEspera` com busca prioritária | Pronto |
+| **2** | Anti-starvation (*aging*) de decolagens | Pessoa 1 (Torre) | Timestamp de entrada e limite de aging | Pronto |
+| **3** | Combustível decrescente com emergência automática | Pessoa 2 (Aviões) | Cálculo dinâmico por autonomia em voo | Pronto |
+| **4** | Fechamento dinâmico de pistas (clima/manutenção) | Pessoa 3 (Pistas) | Thread autônoma (`ControladorDeManutencao`) | Pronto |
+| **6** | Estatísticas operacionais e ocupação no painel | Pessoa 4 (Painel) | Snapshot atômico (`EstatisticasDaTorre`) | Pronto |
+| **7** | Monitor auditor de invariantes globais | Pessoa 4 (Monitor) | Retrato atômico (`RetratoDaTorre`) | Pronto |
+| **Bônus** | Interface Gráfica Interativa com Radar 2D e Cenários | Pessoa 4 (GUI) | Java Swing (`Graphics2D` a 60 FPS) | Pronto |
+
+---
+
+### Detalhamento dos Extras
+
+#### Extra 1 — Emergência fura a fila de pouso (Dono: Pessoa 1)
+* **O que faz:** Um avião em emergência (médica ou combustível crítico) não espera na ordem de chegada: ele é atendido imediatamente antes de qualquer outro pouso ou decolagem comum.
+* **Como funciona:** O método `despachar()` da `TorreDeControle` consulta `filaDePouso.proximoEhEmergencia()`. Havendo pista disponível, a autorização é entregue primeiro ao voo em perigo.
+* **Como demonstrar:** No painel Swing, clique no botão **`[🚨 Injetar Emergência]`**. No terminal ou no radar, o voo ganha destaque em vermelho (`[🚨 EMERGÊNCIA]`) e a torre o despacha imediatamente para a próxima pista livre.
+
+#### Extra 2 — Anti-starvation / Aging (Dono: Pessoa 1)
+* **O que faz:** Impede que aeronaves aguardando decolagem fiquem presas indefinidamente (*starvation*) devido a um fluxo constante de pousos prioritários.
+* **Como funciona:** Cada avião recebe um timestamp ao entrar na fila. Se um voo de decolagem esperar mais do que `limiteAgingMillis` (configurado em 6 segundos no C1), ele é promovido e a torre concede a próxima pista para decolagem, invertendo a prioridade natural de pouso.
+* **Como demonstrar:** O Teste 2 do `TesteTorre` e a execução do Cenário C1 mostram decolagens acontecendo mesmo sob alta demanda de pousos.
+
+#### Extra 3 — Combustível decrescente e emergência automática (Dono: Pessoa 2)
+* **O que faz:** Simula o consumo contínuo de querosene de aviação enquanto o avião está em voo ou em espera.
+* **Como funciona:** A cada instante, o `Aviao` calcula `getCombustivel()` como `1.0 - (tempoEmVoo / autonomiaMillis)`. Se o combustível cair abaixo do limiar (ex.: 30%), o método `estaEmEmergencia()` passa a retornar `true`, ativando automaticamente o Extra 1 da torre. Ao pousar, o tanque é reabastecido para 100%.
+* **Como demonstrar:** No painel terminal e no radar Swing, é possível ver a porcentagem `(Combustível: XX%)` caindo segundo a segundo.
+
+#### Extra 4 — Fechamento dinâmico de pistas (Dono: Pessoa 3)
+* **O que faz:** Simula imprevistos meteorológicos (chuva torrencial, neblina) ou manutenção de pista.
+* **Como funciona:** O `ControladorDeManutencao` roda em thread própria sorteando periodicamente uma pista para fechar (`pista.fechar(motivo)`). A torre deixa de autorizar novos pousos nela e redistribui o tráfego para as pistas remanescentes. **Regra de segurança:** o controlador nunca fecha a última pista aberta do aeroporto.
+* **Como demonstrar:** No painel Swing, clique no botão **`[🚧 Fechar/Reabrir Pista]`** para interditar a pista manualmente, ou aguarde o ciclo automático no Cenário C1.
+
+#### Extra 6 — Estatísticas operacionais em tempo real (Dono: Pessoa 4)
+* **O que faz:** Coleta e expõe métricas de tráfego aéreo sem introduzir gargalos de concorrência.
+* **Como funciona:** A torre mantém contadores atômicos e registros de tempo protegido por trava. O método `torre.getEstatisticas()` devolve um objeto imutável `EstatisticasDaTorre` contendo: total de pousos/decolagens, tempo médio de espera nas filas, maior espera registrada e **% de tempo em que cada pista permaneceu ocupada**.
+* **Como demonstrar:** O rodapé do painel terminal e o dashboard lateral da interface Swing exibem essas informações atualizadas em tempo real.
+
+#### Extra 7 — Monitor auditor de invariantes globais (Dono: Pessoa 4)
+* **O que faz:** Uma thread "auditora" independente que roda a cada 300 ms fiscalizando se as leis fundamentais do sistema continuam intactas.
+* **Invariantes conferidas:**
+  1. *Conservação:* O número total de aeronaves no sistema é rigorosamente constante (nenhum avião sumiu ou foi clonado).
+  2. *Exclusão de estados:* Nenhum avião está em duas filas ou na fila e na pista ao mesmo tempo.
+  3. *Uso exclusivo da pista:* Cada pista possui no máximo 1 avião por vez.
+* **Como funciona:** A cada ciclo, o `MonitorDeInvariantes` obtém um `RetratoDaTorre` (foto atômica das filas e pistas) e executa `verificarConsistencia()`. Se tudo estiver íntegro, exibe badge verde `✔ SISTEMA ÍNTEGRO`. Se houver falha, acusa alerta vermelho no log.
+
+#### Bônus — Interface Gráfica Interativa com Radar 2D e Cenários (Dono: Pessoa 4)
+* **O que faz:** Uma aplicação desktop em Java Swing com visual moderno escuro estilo Cockpit ATC.
+* **Recursos:**
+  - Radar militar circular em 2D com feixe giratório contínuo a 60 FPS.
+  - Desenho vetorial de jatos (`Path2D`) se deslocando suavemente pelo asfalto e pelo céu.
+  - Menu suspenso (*dropdown*) para alternar entre o Cenário C1 (2 pistas) e C2 (pista única) ao vivo, sem reiniciar o programa.
 
 ## Mecanismos de concorrência não vistos em sala
 
