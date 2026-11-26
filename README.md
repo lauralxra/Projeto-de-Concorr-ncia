@@ -7,10 +7,10 @@ Uma torre de controle coordena o uso das pistas, e um painel no terminal mostra 
 
 | Pessoa | Módulo | Revisor |
 |---|---|---|
-| Pessoa 1 | Torre e filas | Pessoa 3 |
+| Aline Oliveira | Torre e filas | Pessoa 3 |
 | Ana Luisa | Aviões e ciclo de vida | Pessoa 4 |
 | M Eduarda | Pistas e exceções | Pessoa 1 |
-| Pessoa 4 | Painel, config e integração | Pessoa 2 |
+| Laura| Painel, config e integração | Pessoa 2 |
 
 ## Como compilar e executar
 
