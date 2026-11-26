@@ -37,13 +37,76 @@ java -cp out aeroporto.torre.TesteTorre
 java -cp out aeroporto.pista.TestePista
 ```
 
-Execução do simulador completo: a preencher.
+Execução do simulador completo no terminal:
+
+```bash
+# Cenário 1: Balanceado (3 pousos, 3 decolagens, 2 pistas)
+java -cp out aeroporto.simulador.Simulador C1
+
+# Cenário 2: Pista única sob estresse de pouso (4 pousos, 1 pista)
+java -cp out aeroporto.simulador.Simulador C2
+
+# Ou passando arquivo de configuração customizado diretamente:
+java -cp out aeroporto.simulador.Simulador cenarios/C1.properties
+```
+
+Para encerrar o painel no terminal a qualquer momento e ver o relatório final consolidado, aperte `Ctrl + C`.
+
+### Modo Gráfico Interativo (Java Swing)
+
+Além do terminal animado com ANSI, o projeto inclui uma interface gráfica moderna em Java Swing com radar 2D, silhueta vetorial de jatos, botões de emergência e interdição de pista:
+
+```bash
+# Executa a interface gráfica Swing (Cenário C1 por padrão)
+java -cp out aeroporto.simulador.SimuladorSwing
+
+# Ou passando a flag --gui para o Simulador principal
+java -cp out aeroporto.simulador.Simulador C1 --gui
+```
 
 ## Arquitetura
 
 ![Fluxograma do simulador](image.png)
 
-Figura de arquitetura final: a preencher.
+```
+                      ┌───────────────────────────────────────────┐
+                      │          Simulador (main)                 │
+                      │  - Carrega Configuracao (C1, C2...)       │
+                      │  - Inicializa Pistas, Torre, Aviões       │
+                      │  - Registra Shutdown Hook (Ctrl + C)      │
+                      └─────────────┬─────────────────────────────┘
+                                    │ instancia e inicia
+            ┌───────────────────────┼───────────────────────────┐
+            ▼                       ▼                           ▼
+  ┌──────────────────┐   ┌──────────────────────┐    ┌────────────────────┐
+  │  Avião (Thread)  │   │   TorreDeControle    │    │  Pista (Exclusiva) │
+  │  (Pessoa 2)      ├──▶│   (Pessoa 1)         │◀───│  (Pessoa 3)        │
+  │  Ciclo infinito: │   │  - FilaDePouso       │    │  - AtomicReference │
+  │  Voo ↔ Solo      │   │  - FilaDeDecolagem   │    │  - CAS fiscalizador│
+  │  Emergência /    │   │  - Lock justo        │    │  - Manutenção /    │
+  │  Combustível     │   │  - Condition (await) │    │    Fechamento      │
+  └─────────┬────────┘   └──────────┬───────────┘    └─────────┬──────────┘
+            │                       │                          │
+            │                       │                          │
+            └───────────────────────┼──────────────────────────┘
+                                    │ publica eventos / lê métricas
+                                    ▼
+       ┌────────────────────────────────────────────────────────┐
+       │   RegistroDeEventos (Buffer Circular Thread-Safe)      │
+       │   EstatisticasDaTorre (Extra 6 - Métricas da Torre)    │
+       │   MonitorDeInvariantes (Extra 7 - Auditor Concorrente) │
+       └────────────────────────────┬───────────────────────────┘
+                                    │ lê snapshots sem travar
+                                    ▼
+       ┌────────────────────────────────────────────────────────┐
+       │          PainelDeControle (Thread ANSI Animada)        │
+       │          Interface Gráfica Swing (Radar ATC 2D)        │
+       │  - Redesenho suave sem piscar (\033[H) a cada 120ms    │
+       │  - Céu e aproximação com arte ASCII                    │
+       │  - Pistas com asfalto animado e avião se deslocando    │
+       │  - Solo, taxiway, status de invariantes e teletype     │
+       └────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -367,30 +430,67 @@ java -cp out aeroporto.pista.TestePista
 
 ## Painel, configuração e estatísticas (Pessoa 4)
 
-### Painel de controle
+A Pessoa 4 é responsável por integrar todos os módulos do sistema, carregar configurações de cenários, fiscalizar as invariantes e apresentar ao usuário tanto um painel dinâmico animado no terminal quanto uma interface gráfica de radar 2D.
 
-A preencher.
+### Painel de controle (`PainelDeControle`)
 
-### Registro de eventos
+Roda em thread própria com redesenho constante a cada N ms (configurável, ex.: 120 ms).
+- **Sem flickering no terminal:** Em vez de executar comandos externos como `clear`, o painel reposiciona o cursor no topo (`\033[H`) e descarrega o quadro em um único `StringBuilder`, resultando em atualização suave e contínua.
+- **Animação visual dos aviões:**
+  - **Espaço Aéreo:** Mostra nuvens pontilhadas e o vetor de aproximação dos voos aguardando autorização de pouso, exibindo o código do voo, o nível de combustível restante e alerta em vermelho para emergências (`🚨`).
+  - **Pistas com asfalto pontilhado:** Exibe o avião se deslocando fisicamente ao longo do asfalto enquanto pousa ou decola (`[ PISTA 01 ] ══[====== 🛬 AD 2774 [POUSANDO] ---]══`), ou sinaliza pista interditada por chuva/manutenção com barreiras `🚧 🚧`.
+  - **Solo e Taxiway:** Exibe aeronaves organizadas na fila de decolagem na cabeceira da pista e aviões em trânsito/reabastecimento no pátio.
+  - **Teletype da Torre:** Rodapé com as últimas mensagens do `RegistroDeEventos`.
 
-A preencher.
+### Interface Gráfica Interativa (`JanelaSimuladorSwing` e `PainelRadar2D`)
 
-### Arquivo de configuração
+Uma interface gráfica moderna em Java Swing desenvolvida com o tema Cockpit/ATC escuro:
+- **Radar Circular ATC 2D:** Renderizado com `Graphics2D` a 60 FPS, com anéis concêntricos de milhas náuticas e feixe giratório de varredura.
+- **Pistas com marcações realistas:** Desenho de cabeceiras (*threshold*), iluminação de borda (Verde/Amarela/Vermelha) e deslocamento vetorial dos jatos.
+- **Botões interativos para apresentação:**
+  - `[🚨 Injetar Emergência]`: Força um avião a entrar em emergência para demonstrar em tempo real que ele fura a fila de pouso (Extra 1).
+  - `[🚧 Fechar/Reabrir Pista]`: Interdita manualmente uma pista para demonstrar a redistribuição de tráfego.
 
-A preencher (formato do arquivo e cenários, ex.: C1 = 3 aviões para pousar e 3 para decolar,
-2 pistas; C2 = 4 aviões querendo pousar, 1 pista).
+### Registro de eventos (`RegistroDeEventos`)
+
+Buffer circular *thread-safe* com capacidade fixa para 50 mensagens:
+- Protegido por `ReentrantLock` para suportar escritas simultâneas de alta frequência por aviões, pistas e torre sem corrupção de dados.
+- Adiciona timestamp `[HH:mm:ss.SSS]` automaticamente em cada mensagem.
+- Método `obterUltimas(n)` devolve uma cópia desacoplada das mensagens, permitindo que o painel leia e formate as últimas linhas sem travar as threads produtoras.
+- Suporta modo silencioso para evitar saídas paralelas desordenadas no terminal durante o desenho do painel.
+
+### Arquivo de configuração (`Configuracao` & `LeitorDeConfiguracao`)
+
+Centraliza os parâmetros do simulador validados contra regras do enunciado:
+- Arquivos `.properties` na pasta `cenarios/`:
+  - `cenarios/C1.properties`: Cenário balanceado (3 pousos iniciais, 3 decolagens iniciais, 2 pistas).
+  - `cenarios/C2.properties`: Cenário de estresse em pista única (4 pousos iniciais, 0 decolagens, 1 pista).
+- Se qualquer parâmetro for inválido (número de pistas $\le 0$, tempos de voo/solo inconsistentes, intervalos negativos), lança `ExcecaoConfiguracaoInvalida`.
+- Pode ser invocado por nome de cenário rápido (`C1`, `C2`) ou pelo caminho relativo do arquivo.
 
 ### Estatísticas (Extra 6)
 
-A preencher.
+Exibe em tempo real os dados consolidados coletados pela torre (`torre.getEstatisticas()`):
+- Total acumulado de pousos e decolagens concluídos.
+- Total de emergências atendidas com sucesso.
+- Tempo médio de espera na fila de pouso vs. fila de decolagem (em segundos).
+- **% de ocupação individual de cada pista:** Rastreia o tempo exato em que a pista permaneceu reservada dividido pelo tempo total transcorrido de simulação.
+- Taxa de vazão operacional (operações concluídas por minuto).
 
 ### Monitor de invariantes (Extra 7)
 
-A preencher.
+Thread auditora independente que acorda a cada 300 ms e confere as garantias matemáticas do sistema:
+1. **Conservação da quantidade de aeronaves:** O número total de aviões no sistema permanece estritamente constante. Nenhum avião é duplicado nem eliminado.
+2. **Exclusão de estados via Retrato Atômico:** Utiliza `torre.getRetrato().verificarConsistencia()` para garantir que nenhum avião está em dois lugares simultaneamente (ex.: na fila de pouso e na pista ao mesmo tempo, ou nas duas filas da torre simultaneamente).
+3. **Consistência da pista:** Cada pista aberta só pode ter no máximo 1 ocupante físico por vez.
+- Caso alguma inconsistência ocorra, altera imediatamente a barra de integridade do painel para alerta vermelho (`▲ VIOLAÇÃO DE INVARIANTE`) e registra o fato no log.
 
 ### Simulador (classe principal)
 
-A preencher.
+Classe `Simulador` que contém o método `main`:
+- Monta e interliga todos os componentes da aplicação a partir da configuração escolhida.
+- Inicializa as threads de forma ordenada.
+- Registra um **Shutdown Hook** (`Runtime.getRuntime().addShutdownHook(...)`): ao receber `Ctrl + C` do operador, interrompe as threads suavemente, devolve o cursor do terminal ao normal e imprime um resumo executivo com todas as estatísticas consolidadas da sessão.
 
 ---
 
@@ -403,24 +503,22 @@ A preencher.
 | 3 | Combustível que diminui na espera | Aviões | Pronto |
 | 4 | Fechamento de pista (manutenção/clima) | Pistas | Pronto |
 | 5 | Portões de embarque | Pistas + Torre | Opcional, se der tempo |
-| 6 | Estatísticas no painel | Painel (dados vêm da Torre) | Dados prontos em `torre.getEstatisticas()`; falta exibir no painel |
-| 7 | Monitor de invariantes | Painel (retrato vem da Torre) | `torre.getRetrato().verificarConsistencia()` pronto; falta a thread do monitor |
+| 6 | Estatísticas no painel | Painel (dados da Torre) | Pronto |
+| 7 | Monitor de invariantes | Painel (retrato da Torre) | Pronto |
 
 ## Mecanismos de concorrência não vistos em sala
 
 | Mecanismo | Onde | Para quê |
 |---|---|---|
-| `ReentrantLock` (justo) | Torre | Trava única das filas e reservas, atendendo na ordem de chegada |
+| `ReentrantLock` (justo) | Torre, Registro | Trava justa das filas/reservas e proteção do buffer circular |
 | `Condition` (`await` / `signalAll`) | Torre | Aviões esperam a autorização sem gastar CPU |
 | `AtomicReference` / `compareAndSet` | Pista | Verificar e ocupar a pista num passo só, detectando dois ocupantes |
-| `volatile` | Pista, Avião | Fechamento visível para todas as threads na hora |
-| `AtomicInteger` | Pista, testes | Contadores compartilhados sem perder contagem |
+| `volatile` | Pista, Avião, Registro | Visibilidade imediata de estado e sinalização entre threads sem cache de núcleo |
+| `AtomicInteger` | Pista, Monitor, testes | Contadores compartilhados sem perder contagem |
+| `AtomicLong` / `AtomicBoolean` | Monitor | Registro e fiscalização atômica de integridade |
 | `CountDownLatch` | Testes | Soltar várias threads ao mesmo tempo para forçar a disputa |
-| `Thread.interrupt()/InterruptedException` | Avião | Encerrar a thread do avião |
-
-
-
-Demais mecanismos: a preencher.
+| `Thread.interrupt()/InterruptedException` | Avião, Simulador | Encerrar as threads graciosamente |
+| `ShutdownHook` | Simulador | Interceptar o sinal `SIGINT` (Ctrl+C) do SO para finalização limpa |
 
 ## Linhas que desativam o controle de concorrência
 
@@ -477,4 +575,4 @@ ferramenta e o modelo utilizados.
 - **Pessoa 1:** A preencher.
 - **Pessoa 2:** Claude utilizado como ferramenta de apoio para compreender o conteúdo e esclarecer dúvidas.
 - **Pessoa 3:** Claude utilizado para ajuda da aprendizagem e manipulação de expressões, funções, palavras do código.
-- **Pessoa 4:** A preencher.
+- **Pessoa 4:** Gemini 2.5 Flash / Antigravity utilizado para arquitetura do painel ANSI animado, interface gráfica Swing com radar 2D, buffer circular thread-safe do registro de eventos e monitor de invariantes.
